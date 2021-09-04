@@ -1,54 +1,92 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/justinas/nosurf"
+	"github.com/patrickoliveros/bookings/config"
+	"github.com/patrickoliveros/bookings/models"
 )
 
 var functions = template.FuncMap{}
+var app *config.AppConfig
 
-func RenderPageWithTemplate(w http.ResponseWriter, tmpl string) {
-	_, err := getAllTemplates(w)
-	if err != nil {
-		fmt.Println("Error getting template cache", err)
+func NewTemplates(a *config.AppConfig) {
+	app = a
+}
+
+func AddDefaultData(td *models.TemplateData, r *http.Request) *models.TemplateData {
+	td.Flash = app.Session.PopString(r.Context(), "flash")
+	td.Error = app.Session.PopString(r.Context(), "error")
+	td.Warning = app.Session.PopString(r.Context(), "warning")
+	td.CSRFToken = nosurf.Token(r)
+	return td
+}
+
+func RenderPageWithTemplate(w http.ResponseWriter, r *http.Request, tmpl string, td *models.TemplateData) {
+
+	var ts map[string]*template.Template
+
+	var page = fmt.Sprintf("%s.page.html", tmpl)
+
+	if app.UseCache {
+		ts = app.TemplateCache
+	} else {
+		ts, _ = CreateAllTemplatesCache()
 	}
 
-	parsedTemplate, _ := template.ParseFiles("./templates/" + tmpl)
+	parsedTemplate, ok := ts[page]
 
-	err = parsedTemplate.Execute(w, nil)
+	if !ok {
+		log.Fatal("Could not get template")
+	}
+
+	buf := new(bytes.Buffer)
+
+	td = AddDefaultData(td, r)
+
+	_ = parsedTemplate.Execute(buf, td)
+	_, err := buf.WriteTo(w)
+
 	if err != nil {
-		fmt.Println("error parsing template:", err)
+		log.Fatal("Could not write template to browser")
 	}
 }
 
-func getAllTemplates(w http.ResponseWriter) (map[string]*template.Template, error) {
-
+func CreateAllTemplatesCache() (map[string]*template.Template, error) {
 	myCache := map[string]*template.Template{}
 
-	pages, err := filepath.Glob("./templates/*.page.tmpl")
+	pages, err := WalkFiles("./templates", ".page.html")
+
 	if err != nil {
 		return myCache, err
 	}
 
 	for _, page := range pages {
 		name := filepath.Base(page)
-		fmt.Println("Page is currently", page)
 		ts, err := template.New(name).Funcs(functions).ParseFiles(page)
 		if err != nil {
+			log.Fatal(err)
 			return myCache, err
 		}
 
-		matches, err := filepath.Glob("./templates/*.layout.tmpl")
+		matches, err := WalkFiles("./templates/layouts", ".layout.html")
 		if err != nil {
+			log.Fatal(err)
 			return myCache, err
 		}
 
 		if len(matches) > 0 {
-			ts, err = ts.ParseGlob("./templates/*.layout.tmpl")
+			ts, err = ts.ParseGlob("./templates/layouts/*.layout.html")
 			if err != nil {
+				log.Fatal(err)
 				return myCache, err
 			}
 		}
@@ -56,6 +94,40 @@ func getAllTemplates(w http.ResponseWriter) (map[string]*template.Template, erro
 		myCache[name] = ts
 	}
 
-	log.Println("RenderPageWithTemplate completed")
 	return myCache, nil
+}
+
+func WalkFiles(rootDirectory, extension string) ([]string, error) {
+
+	var list []string
+
+	err := filepath.Walk(rootDirectory,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			if fileNameWithoutExtension(path) == extension {
+				list = append(list, path)
+			}
+
+			return nil
+		})
+
+	if err != nil {
+		log.Println(err)
+	}
+
+	return list, err
+}
+
+func fileNameWithoutExtension(fileName string) string {
+	if pos := strings.Index(fileName, `.`); pos != -1 {
+		return fileName[pos:]
+	}
+	return fileName
 }
